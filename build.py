@@ -5,6 +5,7 @@ import os
 import importlib.util
 import shutil
 import tempfile
+import sysconfig
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -49,7 +50,8 @@ def build():
         os.environ.get("CMAKE_BUILD_PARALLEL_LEVEL") or str(os.cpu_count() or 1),
     ], check=True)
 
-    so_files = list(BUILD_DIR.glob("**/rwrl_core*.so"))
+    extension_name = 'rwrl_core' + sysconfig.get_config_var('EXT_SUFFIX')
+    so_files = list(BUILD_DIR.glob('**/' + extension_name))
     if not so_files:
         raise SystemExit("Python extension was not generated; check the CMake output.")
 

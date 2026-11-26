@@ -1,4 +1,5 @@
 from event import EventBus, EventType, Event
+from rl.native_commands import NativeStepper
 
 
 class Player:
@@ -41,6 +42,7 @@ class Room:
         self.state = "waiting"
         self.game_time = 0.0
         self.winner = None
+        self.stepper = None
         self._next_pid = 1
 
     def add_player(self, name: str, conn=None, client_id: str = None) -> Player:
@@ -73,12 +75,14 @@ class Room:
             player.present_at_game_start = (
                 player.conn is not None and player.conn.registered
             )
-        if map_loaded:
-            for team_id in {player.team_id for player in self.players.values()}:
-                if self.engine.get_world(team_id) is None:
-                    self.engine.create_world(team_id)
-        else:
-            self.engine.setup_teams(0, 1)
+        participants = [p for p in self.players.values() if p.team_id != -3]
+        if not map_loaded:
+            self.engine.setup_teams_vec([p.slot_id for p in participants])
+        for player in participants:
+            world = self.engine.create_world(player.slot_id)
+            self.engine.set_team_alliance(player.slot_id, player.team_id)
+            world.add_credits(self.starting_credits - world.credits())
+        self.stepper = NativeStepper(self.engine)
         self.state = "playing"
         self.game_time = 0.0
         self.winner = None
@@ -91,10 +95,12 @@ class Room:
         self.winner = winner_team
         self.events.emit(Event(EventType.GAME_OVER, winner=winner_team, room=self))
 
-    def tick(self, dt: float = 1.0 / 60.0):
-        if self.state != "playing":
+    def tick(self, dt: float = None, *, commands=()):
+        if self.state != "playing" or self.engine.is_paused():
             return
-        self.engine.tick(dt)
+        if self.stepper is None or self.stepper.engine is not self.engine:
+            self.stepper = NativeStepper(self.engine)
+        self.stepper.advance(commands, delta=None if dt is None else dt * 60.0)
         self.game_time = self.engine.game_time()
 
         if self.engine.global_tick() % 60 == 0:
@@ -103,15 +109,9 @@ class Room:
     def _check_victory(self):
         if self.game_time < 5.0:
             return
-        alive = []
-        for tid in [0, 1]:
-            w = self.engine.get_world(tid)
-            if w:
-                has_buildings = any(u.is_alive and u.is_building for u in w.units().values())
-                if has_buildings:
-                    alive.append(tid)
-        if len(alive) <= 1:
-            self.end_game(alive[0] if alive else -1)
+        state = self.engine.get_state()
+        if state.game_over:
+            self.end_game(state.winner_team)
 
     def get_state(self):
         return {

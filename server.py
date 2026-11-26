@@ -3,6 +3,7 @@ from pathlib import Path
 import sys
 import struct
 import time
+import math
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "py"))
 
@@ -14,7 +15,8 @@ from net.packet import (pack_preregister_info, pack_server_info, pack_team_list,
                         pack_chat, pack_heartbeat_request, pack_heartbeat_response,
                         parse_heartbeat_response, parse_preregister,
                         parse_register_player, parse_get_server_info, unpack_string,
-                        DEFAULT_MAP, DEFAULT_MAP_PATH, validate_game_command,
+                        DEFAULT_MAP, DEFAULT_MAP_PATH, pack_step_rate_command,
+                        starting_credit_mode,
                         pack_kick, pack_disconnect, pack_get_server_info)
 from game import Room, Player
 from command import CommandHandler
@@ -22,24 +24,32 @@ from event import EventBus, EventType, Event
 from config import Config
 from unit_config import load_unit_assets
 from resource_paths import MAPS_DIR, resolve_map_path
+from rl.native_commands import prepare_client_command
+from rl.replay_parser import ReplayAction, parse_game_command
 
 
 class RwrlServer:
     def __init__(self, config: Config = None):
         self.config = config or Config()
         self.rl_mode = self.config.rl_enabled
+        if not self.rl_mode:
+            starting_credit_mode(self.config.starting_credits)
         self.engine = None
         self.room = None
         self.events = EventBus()
         self.cmd = CommandHandler(self)
         self._running = False
+        self._state_lock = threading.RLock()
         self._player_conns: dict[int, Connection] = {}
         self._next_heartbeat_at = 0.0
         self._next_team_sync_at = 0.0
         self.map_name = DEFAULT_MAP
         self.map_path = DEFAULT_MAP_PATH
-        self._pending_game_commands: list[bytes] = []
+        self._pending_game_commands: list[tuple[bytes, ReplayAction]] = []
         self._game_tick_history: list[bytes] = []
+        self._next_blocking_frame = 0
+        self._game_ready = False
+        self._game_start_time = 0.0
         self._fog = 2
         self._all_mute = False
         self._pending_summon = None
@@ -63,6 +73,10 @@ class RwrlServer:
         print(f"[Server] Player connected: {conn}")
 
     def _on_disconnect(self, conn: Connection):
+        with self._state_lock:
+            self._disconnect_player(conn)
+
+    def _disconnect_player(self, conn: Connection):
         if conn.player_id < 0 or not self.room:
             return
         if self._player_conns.get(conn.player_id) is not conn:
@@ -104,6 +118,10 @@ class RwrlServer:
                 self._sync_team_lists()
 
     def _on_packet(self, conn: Connection, pkt_type: int, body: bytes):
+        with self._state_lock:
+            self._dispatch_packet(conn, pkt_type, body)
+
+    def _dispatch_packet(self, conn: Connection, pkt_type: int, body: bytes):
         if (conn.player_id >= 0 and
                 self._player_conns.get(conn.player_id) is not conn):
             return
@@ -125,6 +143,9 @@ class RwrlServer:
                     conn.reconnect_activating = True
                     self._activate_reconnected_player(conn)
             else:
+                if not conn.in_game:
+                    for packet in self._game_tick_history:
+                        conn.queue_send(packet)
                 conn.in_game = True
         elif pkt_type == PacketType.DISCONNECT:
             try:
@@ -281,6 +302,11 @@ class RwrlServer:
                 conn.slot_id,
                 max_players=self.config.max_players,
                 starting_credits=int(self.config.starting_credits),
+                max_units=self.config.unit_cap,
+                income_multiplier=self.config.income_mult,
+                paused=bool(self.engine and self.engine.is_paused()),
+                fog=self._fog,
+                no_nukes=not getattr(self.config, 'nukes_enabled', True),
             )
             conn.queue_send(packet)
 
@@ -344,25 +370,35 @@ class RwrlServer:
         if not self.room or self.room.state != "playing":
             return
         try:
-            validate_game_command(body)
+            shared_mask = sum(1 << player.slot_id for player in self.room.players.values()
+                              if player.shared_control and 0 <= player.slot_id < 16)
+            body, action = prepare_client_command(body, conn.slot_id, shared_mask)
+            team = action.player_index
+            if team >= 128:
+                team -= 256
+            if self.engine.get_world(team) is None:
+                return
         except ValueError:
             return
-        self._pending_game_commands.append(body)
+        self._pending_game_commands.append((body, action))
 
     def _send_server_info(self, conn: Connection):
         player = self.room.players.get(conn.player_id) if self.room else None
         is_admin = player.is_admin if player else False
         conn.queue_send(pack_server_info(
             map_name=self.map_name,
+            max_units=self.config.unit_cap,
+            income_multiplier=self.config.income_mult,
             is_admin=is_admin,
             fog=self._fog,
             starting_credits=int(self.config.starting_credits),
+            no_nukes=not getattr(self.config, 'nukes_enabled', True),
         ))
         pkt = pack_get_server_info(
             player_size=len(self._player_conns),
             max_player=self.config.max_players,
             map_name=self.map_name,
-            income=getattr(self.config, 'income_multiplier', 1.0),
+            income=self.config.income_mult,
             credits=int(self.config.starting_credits),
             no_nukes=not getattr(self.config, 'nukes_enabled', True),
             init_unit=getattr(self.config, 'starting_units', 1),
@@ -382,14 +418,18 @@ class RwrlServer:
         self._player_conns.clear()
         self._pending_game_commands.clear()
         self._game_tick_history.clear()
+        self._next_blocking_frame = 0
+        self._game_ready = False
 
     def _on_game_start(self, event: Event):
         pkt = pack_start(map_name=self.map_path)
-        self.net.broadcast_raw(pkt)
+        if self.net is not None:
+            self.net.broadcast_raw(pkt)
 
     def _on_game_over(self, event: Event):
         pkt = pack_game_over()
-        self.net.broadcast_raw(pkt)
+        if self.net is not None:
+            self.net.broadcast_raw(pkt)
         if self.room:
             self.room.state = "waiting"
             self.room.winner = None
@@ -397,12 +437,17 @@ class RwrlServer:
             self.engine = Engine()
             load_unit_assets(self.engine)
             self.room.engine = self.engine
+            self.room.stepper = None
             self._pending_game_commands.clear()
             self._game_tick_history.clear()
+            self._next_blocking_frame = 0
+            self._game_ready = False
             self._apply_fog()
             for p in self.room.players.values():
                 p.present_at_game_start = False
                 p.reconnect_packets = []
+                if p.conn is not None:
+                    p.conn.in_game = False
             self._sync_team_lists()
 
     def send_chat(self, player_id: int, message: str):
@@ -502,13 +547,49 @@ class RwrlServer:
         return False
 
     def start_game(self):
+        with self._state_lock:
+            self._start_game()
+
+    def _start_game(self):
         if not self.room or self.room.state != "waiting":
             return
+        if not any(p.team_id != -3 for p in self.room.players.values()):
+            return
+        rwrl_core.set_global_random_seed(0)
+        self.engine.set_singleplayer_mode(False)
+        self.engine.set_unit_cap(self.config.unit_cap)
+        self.engine.set_income_mult(self.config.income_mult)
+        self.engine.set_nukes_enabled(getattr(self.config, 'nukes_enabled', True))
+        self.room.starting_credits = self.config.starting_credits
         map_loaded = self._load_game_map()
+        if not map_loaded:
+            self._broadcast_system_chat(f'Cannot load map: {self.map_path}')
+            return
         self._pending_game_commands.clear()
         self._game_tick_history.clear()
+        self._next_blocking_frame = 0
+        self._game_ready = False
+        self._game_start_time = time.monotonic()
         self.room.start_game(map_loaded=map_loaded)
+        if self.config.speed != 1.0:
+            self.set_game_speed(self.config.speed)
         self._apply_fog()
+
+    def set_game_speed(self, speed: float) -> bool:
+        if not math.isfinite(speed) or speed < 0.1:
+            return False
+        with self._state_lock:
+            self.config._cp.set('server', 'speed', str(speed))
+            if self.room and self.room.state == 'playing':
+                body = pack_step_rate_command(speed)
+                self._pending_game_commands.append((body, parse_game_command(body)))
+        return True
+
+    def set_paused(self, paused: bool):
+        with self._state_lock:
+            if self.engine is not None:
+                self.engine.set_paused(paused)
+                self._sync_team_lists()
 
     def _apply_fog(self):
         if not self.engine:
@@ -523,7 +604,7 @@ class RwrlServer:
             player_size=n_players,
             max_player=self.config.max_players,
             map_name=self.map_name,
-            income=getattr(self.config, 'income_multiplier', 1.0),
+            income=self.config.income_mult,
             credits=int(self.config.starting_credits),
             no_nukes=not getattr(self.config, 'nukes_enabled', True),
             init_unit=getattr(self.config, 'starting_units', 1),
@@ -537,7 +618,8 @@ class RwrlServer:
         if not candidate.is_file():
             return False
         try:
-            self.engine.load_map(str(candidate))
+            active_slots = [p.slot_id for p in self.room.players.values() if p.team_id != -3]
+            self.engine.load_map(str(candidate), active_teams=active_slots)
         except RuntimeError:
             return False
         return True
@@ -561,33 +643,48 @@ class RwrlServer:
         dt = 1.0 / self._net_tick_rate if self._net_tick_rate > 0 else 1.0 / FRAME_RATE
         unlimited = self._net_tick_rate <= 0
         while self._running:
-            if not self.rl_mode:
-                now = time.monotonic()
-                if now >= self._next_heartbeat_at:
-                    self._send_heartbeats()
-                    self._next_heartbeat_at = now + 1.0
-                if now >= self._next_team_sync_at:
-                    self._sync_team_lists()
-                    self._next_team_sync_at = now + 2.0
-
-            if self.room:
-                self.room.tick(dt)
-                if self.room.state == "playing" and self.engine:
-                    if self.engine.global_tick() % 10 == 0:
-                        commands = self._pending_game_commands
-                        self._pending_game_commands = []
-                        tick = self.engine.global_tick()
-                        pkt = pack_tick(tick, commands)
-                        if not self.rl_mode:
-                            if len(self._game_tick_history) > 6000:
-                                self._game_tick_history = self._game_tick_history[-4000:]
-                            self._game_tick_history.append(pkt)
-                            self._send_game_tick(pkt)
+            with self._state_lock:
+                if not self.rl_mode:
+                    now = time.monotonic()
+                    if now >= self._next_heartbeat_at:
+                        self._send_heartbeats()
+                        self._next_heartbeat_at = now + 1.0
+                    if now >= self._next_team_sync_at:
+                        self._sync_team_lists()
+                        self._next_team_sync_at = now + 2.0
+                self._tick_game()
 
             if unlimited:
                 time.sleep(0)
             else:
                 time.sleep(dt)
+
+    def _tick_game(self):
+        if not self.room or self.room.state != 'playing' or not self.engine:
+            return
+        if self.engine.is_paused():
+            return
+        if not self._game_ready:
+            waiting = any(conn.registered and not conn.in_game and not conn.reconnecting
+                          for conn in self._player_conns.values())
+            if waiting and time.monotonic() - self._game_start_time < 15.0:
+                return
+            self._game_ready = True
+
+        frame = self.engine.global_tick()
+        commands = []
+        if frame == self._next_blocking_frame:
+            pending = self._pending_game_commands
+            self._pending_game_commands = []
+            self._next_blocking_frame += 10
+            packet = pack_tick(self._next_blocking_frame, [body for body, _ in pending])
+            if not self.rl_mode:
+                self._game_tick_history.append(packet)
+                self._send_game_tick(packet)
+            commands = [action for _, action in pending]
+        elif frame > self._next_blocking_frame:
+            raise RuntimeError('Simulation advanced past the network blocking frame')
+        self.room.tick(commands=commands)
 
     def _send_game_tick(self, packet: bytes):
         if not self.room:
@@ -638,7 +735,7 @@ def main():
     cfg = Config(args.config)
     if args.host:
         cfg._cp.set('server', 'host', args.host)
-    if args.port:
+    if args.port is not None:
         cfg._cp.set('server', 'port', str(args.port))
 
     server = RwrlServer(cfg)

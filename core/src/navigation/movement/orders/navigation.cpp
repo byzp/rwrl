@@ -295,7 +295,7 @@ bool World::update_unit_order_navigation_(
                         is_enemy_with(*target_world) &&
                         unit.behavior != Behavior::HOLD_FIRE &&
                         unit.behavior != Behavior::RETURN_FIRE &&
-                        can_see(*target) && can_target_(unit, *target) &&
+                        can_target_(unit, *target) &&
                         dist2(unit.x, unit.y, target->x, target->y) <
                             target_range * target_range;
                 }
@@ -668,7 +668,6 @@ bool World::update_unit_order_navigation_(
                     patrol_target->parent_uid != 0 ||
                     patrol_target_world == this ||
                     !is_enemy_with(*patrol_target_world) ||
-                    !can_see(*patrol_target) ||
                     !can_target_(unit, *patrol_target) ||
                     dist2(unit.x, unit.y, patrol_target->x, patrol_target->y) >=
                         patrol_engagement_range * patrol_engagement_range) {
@@ -1019,6 +1018,7 @@ bool World::update_unit_order_navigation_(
             unit, unit.order_queue.front().unit_type);
         const bool build_private_path =
             active_type == WeaponType::BUILD &&
+            unit.spawn_delay_frames == 0.0f &&
             (!formation_leader || !unit.formation_projection_allowed) &&
             dist2(unit.x, unit.y, unit.order_queue.front().x,
                   unit.order_queue.front().y) >
@@ -1035,6 +1035,9 @@ bool World::update_unit_order_navigation_(
         }
         if (build_private_path &&
             !unit.using_path && !unit.path_request_pending) {
+            // The generic am.cl gate steers directly while factory launch
+            // delay is positive. Only after it clears can BUILD wait for a
+            // private node or request a path.
             // y.f() publishes k/l/m even when the preceding update was in
             // construction range. Without af, generic navigation coasts
             // while s counts down; it does not bypass the request cooldown.
@@ -1838,7 +1841,7 @@ bool World::update_unit_order_navigation_(
             is_enemy_with(*attacked_world) &&
             unit.behavior != Behavior::HOLD_FIRE &&
             unit.behavior != Behavior::RETURN_FIRE &&
-            can_see(*attacked) && can_target_(unit, *attacked) &&
+            can_target_(unit, *attacked) &&
             dist2(unit.x, unit.y, attacked->x, attacked->y) <
                 main_target_range * main_target_range) {
             attack_move_main_target_valid = true;
@@ -3235,7 +3238,7 @@ bool World::update_unit_order_navigation_(
             }
         }
         if (current_main_target && current_main_world &&
-            slot_has_target && can_see(*current_main_target) &&
+            slot_has_target &&
             can_target_(unit, *current_main_target)) {
             f32 active_weapon_range = unit.weapon_range;
             if (unit.attack_range_adds_radii) {

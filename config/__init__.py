@@ -15,6 +15,7 @@ _DEFAULTS = {
         'speed': '2.5',
         'starting_credits': '4000',
         'income_mult': '1.0',
+        'unit_cap': '250',
         'map_width': '2000',
         'map_height': '2000',
     },
@@ -78,8 +79,14 @@ class Config:
     def speed(self): return self.getfloat('server', 'speed')
     @property
     def starting_credits(self): return self.getfloat('server', 'starting_credits')
+    @starting_credits.setter
+    def starting_credits(self, value): self._cp.set('server', 'starting_credits', str(value))
     @property
     def income_mult(self): return self.getfloat('server', 'income_mult')
+    @income_mult.setter
+    def income_mult(self, value): self._cp.set('server', 'income_mult', str(value))
+    @property
+    def unit_cap(self): return self.getint('server', 'unit_cap')
     @property
     def map_width(self): return self.getint('server', 'map_width')
     @property

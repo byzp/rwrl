@@ -6,9 +6,9 @@ d_ff = 512
 dropout = 0.1        # BC only; self-play forces 0.0 behaviour via eval/no-dropout paths
 
 [training]
-mode = "curriculum"
+mode = "bc"
 device = "auto"
-dtype = "bf16"
+dtype = "fp16"
 seed = 42
 
 [selfplay]
@@ -32,19 +32,31 @@ save_every_games = 10
 save_every_steps = 0
 
 [bc]
+supervision = "policy"
+map_name = "[p2]Ice Island (2p)"
 dataset_dir = "dataset"
+cache_dir = "dataset/bc_cache"
+validation_fraction = 0.2
 max_files = 0
 epochs = 5
 batch_size = 64
 lr = 1.0e-4
 weight_decay = 1.0e-5
 action_type_coef = 1.0
-coord_coef = 1.0
+coord_coef = 0.25
 build_type_coef = 0.5
 queue_coef = 0.2
-max_actions_per_replay = 0
+target_coef = 0.5
+offset_coef = 0.5
+noop_coef = 0.25
+location_smoothing = 0.1
+# Reservoir sampling covers the complete replay rather than its first actions.
+max_actions_per_replay = 512
+max_replay_frames = 0
+idle_sample_probability = 0.05
+min_uid_match_rate = 0.9
 ticks_per_step = 10
-num_workers = 8
+num_workers = 4
 log_interval = 50
 save_every_steps = 500
 
@@ -69,5 +81,5 @@ cc_death_penalty = -5.0
 win_bonus = 5.0            # sole survivor of the match
 
 [paths]
-save_dir = "models"
-log_dir = "logs"
+save_dir = "models/bc_ice"
+log_dir = "logs/bc_ice"

@@ -1802,12 +1802,13 @@ PYBIND11_MODULE(rwrl_core, m) {
              py::arg("team_a") = 0, py::arg("team_b") = 1)
         .def("setup_teams_vec", &rwrl::Engine::setup_teams_vec)
         .def("load_map", [](rwrl::Engine& engine, const py::object& path,
-                            bool spawn_map_units) {
+                            bool spawn_map_units, const rwrl::Vec<rwrl::i32>& active_teams) {
             const py::object resolved = py::module_::import("resource_paths")
                 .attr("resolve_map_path")(path);
-            engine.load_map(py::str(resolved).cast<rwrl::Str>(), spawn_map_units);
+            engine.load_map(py::str(resolved).cast<rwrl::Str>(), spawn_map_units, active_teams);
         },
-             py::arg("path"), py::arg("spawn_map_units") = true)
+             py::arg("path"), py::arg("spawn_map_units") = true,
+             py::arg("active_teams") = rwrl::Vec<rwrl::i32>{})
         .def("restore_unit", &rwrl::Engine::restore_unit,
              py::return_value_policy::reference_internal)
         .def("finish_unit_restore", &rwrl::Engine::finish_unit_restore,

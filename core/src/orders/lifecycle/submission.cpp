@@ -161,8 +161,7 @@ bool World::submit_order_(Unit& unit, const GameCommand& cmd,
 
         switch (order.type) {
         case WeaponType::TOUCH_TARGET:
-            if (target_world == this || !is_enemy_with(*target_world) ||
-                !can_see(*target)) return false;
+            if (target_world == this || !is_enemy_with(*target_world)) return false;
             break;
         case WeaponType::GUARD:
         case WeaponType::FOLLOW:

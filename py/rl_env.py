@@ -223,6 +223,19 @@ class RLEnv:
         self._reward_config = reward_config or RewardConfig()
         self._prev_obs: dict[int, TeamObservation] = {}
 
+    @property
+    def worlds(self) -> list[rwrl_core.World]:
+        # Quick resync replaces the C++ World objects. Resolve their stable
+        # team IDs on access instead of retaining pointers to freed worlds.
+        if self.engine is None:
+            return []
+        return [world for team in self._world_team_ids
+                if (world := self.engine.get_world(team)) is not None]
+
+    @worlds.setter
+    def worlds(self, worlds):
+        self._world_team_ids = [world.team_id() for world in worlds]
+
     def reset(self, num_teams: int = 2, map_path: str | None = None) -> dict:
         self.engine = rwrl_core.Engine()
         load_unit_assets(self.engine)
@@ -249,12 +262,13 @@ class RLEnv:
                                   cy + rad * math.sin(ang), True)
                 if cc:
                     w.set_cc_uid(cc.uid)
-        self.worlds = []
+        worlds = []
         for tid in range(num_teams):
             w = self.engine.get_world(tid)
             if w is not None:
-                self.worlds.append(w)
+                worlds.append(w)
                 w.add_credits(max(0, self._starting_credits - w.credits()))
+        self.worlds = worlds
         self._static_map = None
         self._prev_obs = {}
         self.engine.run_for(0.0, self._dt)

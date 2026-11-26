@@ -193,10 +193,27 @@ struct TilesetInfo {
 };
 
 fs::path resolve_tileset_path(const fs::path& tmx_path, const Str& source) {
-    const fs::path candidate =
-        (tmx_path.parent_path() / fs::path(source)).lexically_normal();
-    std::error_code error;
-    if (fs::is_regular_file(candidate, error)) return candidate;
+    const fs::path relative = fs::path(source);
+    Vec<fs::path> candidates;
+    candidates.push_back((tmx_path.parent_path() / relative).lexically_normal());
+
+    for (fs::path cursor = tmx_path.parent_path(); !cursor.empty();
+         cursor = cursor.parent_path()) {
+        if (cursor.filename() == "maps") {
+            const fs::path tileset_root = cursor.parent_path() / "tilesets";
+            candidates.push_back((tileset_root / relative).lexically_normal());
+            // A few shipped maps retain their source-repository prefix, for
+            // example ../rustedWarfareMaps-testing/misc.tsx. Packaged assets
+            // flatten that shared file to assets/tilesets/misc.tsx.
+            candidates.push_back((tileset_root / relative.filename()).lexically_normal());
+        }
+        const fs::path parent = cursor.parent_path();
+        if (parent == cursor) break;
+    }
+    for (const fs::path& candidate : candidates) {
+        std::error_code error;
+        if (fs::is_regular_file(candidate, error)) return candidate;
+    }
     throw std::runtime_error("cannot resolve external tileset '" + source +
                              "' from " + tmx_path.string());
 }

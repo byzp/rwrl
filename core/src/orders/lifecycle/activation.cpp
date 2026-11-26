@@ -169,8 +169,7 @@ bool World::activate_order_(Unit& unit, const UnitOrder& order,
             unit.reversing && unit.move_speed_factor < 0.0f;
         return true;
     case WeaponType::ATTACK: {
-        if (!target || !target->is_alive || target->parent_uid != 0 || target_world == this ||
-            !can_see(*target)) {
+        if (!target || !target->is_alive || target->parent_uid != 0 || target_world == this) {
             // Keep the accepted waypoint for y.g()'s invalid-target branch.
             // It may adopt the retained R target before deciding to finish;
             // cargo targets also remain available to the order handler.
@@ -326,7 +325,8 @@ bool World::activate_order_(Unit& unit, const UnitOrder& order,
         // its s gate. y.f() publishes the placement proposal, then the
         // generic controller decides whether that retained state needs a
         // request. Activation must not replace it with a fresh coast path.
-        if (unit.using_path || unit.path_request_pending ||
+        if (unit.spawn_delay_frames > 0.0f ||
+            unit.using_path || unit.path_request_pending ||
             unit.repath_cooldown_frames > 0.0f) {
             return true;
         }

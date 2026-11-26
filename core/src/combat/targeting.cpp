@@ -104,7 +104,7 @@ Unit* World::select_passive_target_(
         }
         for (auto& [_, candidate] : candidate_world->units_) {
             if (!candidate.is_alive || candidate.parent_uid != 0 ||
-                !can_see(candidate) || !can_target_(unit, candidate)) {
+                !can_target_(unit, candidate)) {
                 continue;
             }
             // ae.setup() resets the callback's distance, not y.R. With no
@@ -238,7 +238,7 @@ void World::publish_single_attack_move_proposal_(
         target_world == this || !is_enemy_with(*target_world) ||
         unit->behavior == Behavior::HOLD_FIRE ||
         unit->behavior == Behavior::RETURN_FIRE ||
-        !can_see(*target) || !can_target_(*unit, *target) ||
+        !can_target_(*unit, *target) ||
         dist2(unit->x, unit->y, target->x, target->y) >=
             main_target_range * main_target_range) {
         return;
@@ -346,9 +346,10 @@ void World::auto_combat_(const Vec<World*>& enemy_worlds,
                 }
             }
 
+            // y.a(am,boolean) checks the unit-target overload am.d(am).
+            // Fog visibility uses am.d(n) and does not gate simulation combat.
             bool compatible = passive_targeting_enabled &&
                               current_main_target != nullptr &&
-                              can_see(*current_main_target) &&
                               can_target_(unit, *current_main_target);
             if (compatible) {
                 // y.a(am,false) compares squared floats directly. Taking a
@@ -427,7 +428,6 @@ void World::auto_combat_(const Vec<World*>& enemy_worlds,
                             const bool retained_combat_proposal =
                                 (unit.recent_order_chase ||
                                  (current_main_target != nullptr &&
-                                  can_see(*current_main_target) &&
                                   (guarded_recently_attacked ||
                                    unit_recently_attacked))) &&
                                 unit.guard_movement_target_valid &&
@@ -687,7 +687,7 @@ void World::auto_combat_(const Vec<World*>& enemy_worlds,
                 auto consider = [&](World* candidate_world, Unit& candidate) {
                     if (!candidate.is_alive || candidate.parent_uid != 0 ||
                         candidate_world == this) return;
-                    if (!can_see(candidate) || !can_target_(unit, candidate)) return;
+                    if (!can_target_(unit, candidate)) return;
                     if (!within_turret_limiting_angle(unit, slot, candidate)) return;
                     if (candidate.collision_spatial_cell_x < min_cell_x ||
                         candidate.collision_spatial_cell_x > max_cell_x ||
@@ -825,7 +825,7 @@ void World::auto_combat_(const Vec<World*>& enemy_worlds,
                 if (!target) continue;
                 const bool independent = target->uid != main_target_uid;
                 if (!target->is_alive || target->parent_uid != 0 ||
-                    (independent && (!can_see(*target) || !can_target_(unit, *target))) ||
+                    (independent && !can_target_(unit, *target)) ||
                     !turret_target_allowed(unit, slot, *target, independent) ||
                     !target_layer_allowed(*this, unit, *target, slot.targets_air,
                         slot.targets_ground, slot.targets_underwater,
@@ -944,15 +944,14 @@ void World::auto_combat_(const Vec<World*>& enemy_worlds,
         World* enemy_world = nullptr;
         Unit* enemy = nullptr;
         f32 nearest_dist = std::numeric_limits<f32>::max();
-        auto nearest_visible_in = [&](World* candidate_world) -> Unit* {
+        auto nearest_target_in = [&](World* candidate_world) -> Unit* {
             const f32 search_range = engagement_range_(unit);
             Unit* found = nullptr;
             f32 found_distance = std::numeric_limits<f32>::max();
             for (u32 candidate_uid : candidate_world->grid_.query_circle(
                      unit.x, unit.y, search_range)) {
                 Unit* candidate = candidate_world->get_unit(candidate_uid);
-                if (!candidate || !candidate->is_alive || candidate->parent_uid != 0 ||
-                    !can_see(*candidate)) continue;
+                if (!candidate || !candidate->is_alive || candidate->parent_uid != 0) continue;
                 if (air_only && !candidate->airborne) continue;
                 if (!can_target_(unit, *candidate)) continue;
                 const f32 candidate_distance = unit.distance_to(*candidate);
@@ -972,14 +971,13 @@ void World::auto_combat_(const Vec<World*>& enemy_worlds,
                 Unit* designated = candidate_world->get_unit(main_target_uid);
                 if (designated && designated->is_alive && designated->parent_uid == 0 &&
                     can_target_(unit, *designated)) {
-                    if (!can_see(*designated)) continue;
                     enemy_world = candidate_world;
                     enemy = designated;
                     break;
                 }
                 continue;
             }
-            Unit* candidate = nearest_visible_in(candidate_world);
+            Unit* candidate = nearest_target_in(candidate_world);
             if (!candidate) continue;
             const f32 candidate_dist = unit.distance_to(*candidate);
             if (candidate_dist < nearest_dist ||

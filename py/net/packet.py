@@ -10,6 +10,14 @@ SERVER_ID = "net.rwrl.server"
 SERVER_UUID = "rwrl-python-server"
 DEFAULT_MAP = "[p2]Small_Island (2p).tmx"
 DEFAULT_MAP_PATH = f"maps/skirmish/{DEFAULT_MAP}"
+STARTING_CREDIT_VALUES = (4000, 0, 1000, 2000, 5000, 10000, 50000, 100000, 200000)
+
+
+def starting_credit_mode(credits: int) -> int:
+    try:
+        return STARTING_CREDIT_VALUES.index(credits)
+    except ValueError as exc:
+        raise ValueError(f'Unsupported original 1.15 starting credits: {credits}') from exc
 
 
 class PacketType(IntEnum):
@@ -241,15 +249,16 @@ def pack_server_info(
     is_admin: bool = True,
     fog: int = 2,
     starting_credits: int = 4000,
+    no_nukes: bool = False,
 ) -> bytes:
     body = bytearray()
     body += pack_string(GAME_ID)
     body += struct.pack(">ii", PROTOCOL_VERSION, 0)
     body += pack_string(map_name)
-    body += struct.pack(">ii?i", starting_credits, fog, False, 0)
+    body += struct.pack(">ii?i", starting_credit_mode(starting_credits), fog, True, 1)
     body += struct.pack(">b??", 8, is_admin, is_admin)
     body += struct.pack(">iiif", max_units, max_units, starting_units, income_multiplier)
-    body += struct.pack(">???", False, False, False)
+    body += struct.pack(">???", no_nukes, False, False)
     body += struct.pack(">?????i", False, False, False, True, False, 0)
     return pack_packet(PacketType.SERVER_INFO, bytes(body))
 
@@ -260,13 +269,14 @@ def _pack_team_player(
     team_id: int,
     credits: int,
     is_admin: bool = False,
+    shared_control: bool = False,
 ) -> bytes:
     data = bytearray()
     data += struct.pack(">bii", slot, credits, team_id)
     data += _pack_optional_string(name)
     data += struct.pack(">?iq", False, -1, -1)
     data += struct.pack(">?ii", False, 0, 0)
-    data += struct.pack(">b????i", 0, False, False, False, False, -9999)
+    data += struct.pack(">b????i", 0, shared_control, False, False, False, -9999)
     data += _pack_optional_string(None)
     data += struct.pack(">i", 1 if is_admin else 0)
     for _ in range(4):
@@ -283,6 +293,9 @@ def pack_team_list(
     max_units: int = 200,
     starting_units: int = 1,
     income_multiplier: float = 1.0,
+    paused: bool = False,
+    fog: int = 2,
+    no_nukes: bool = False,
 ) -> bytes:
     max_players = max(2, min(int(max_players), 100))
     team_data = bytearray()
@@ -302,6 +315,7 @@ def pack_team_list(
                 player.team_id,
                 int(starting_credits),
                 getattr(player, "is_admin", False),
+                getattr(player, "shared_control", False),
             )
 
     compressed = gzip.compress(bytes(team_data), mtime=0)
@@ -309,10 +323,10 @@ def pack_team_list(
     body += pack_string("teams")
     body += struct.pack(">i", len(compressed))
     body += compressed
-    body += struct.pack(">ii?i", 2, 0, True, 1)
+    body += struct.pack(">ii?i", fog, starting_credit_mode(starting_credits), True, 1)
     body += struct.pack(">bi", 5, max_units)
     body += struct.pack(">iif", max_units, starting_units, income_multiplier)
-    body += struct.pack(">?????", False, False, False, False, False)
+    body += struct.pack(">?????", no_nukes, False, False, False, paused)
     return pack_packet(PacketType.TEAM_LIST, bytes(body))
 
 
@@ -370,6 +384,16 @@ def validate_game_command(body: bytes) -> None:
     reader.read(block_length)
     if reader.remaining:
         raise ValueError(f"game command has {reader.remaining} trailing bytes")
+
+
+def pack_step_rate_command(rate: float) -> bytes:
+    """Serialize the host's e.r/e.s command in the original 1.15 wire format."""
+    payload = bytearray(struct.pack('>b???ii??i??q',
+                                    -1, False, False, False, -1, -1,
+                                    False, False, 0, False, False, -1))
+    payload += pack_string('-1')
+    payload += struct.pack('>?H?bffii?', False, 0, True, 0, rate, 0.0, 0, 0, False)
+    return pack_string('c') + struct.pack('>i', len(payload)) + payload
 
 
 def pack_start(

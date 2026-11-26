@@ -197,11 +197,18 @@ void Engine::set_nukes_enabled(bool enabled) {
     for (auto& [_, world] : worlds_) world.set_nukes_enabled(enabled);
 }
 
-void Engine::load_map(const Str& path, bool spawn_map_units) {
+void Engine::load_map(const Str& path, bool spawn_map_units,
+                      const Vec<i32>& active_team_ids) {
     MapData loaded = load_tmx_map(path);
+    const Set<i32> active_teams(active_team_ids.begin(), active_team_ids.end());
+    const auto participating = [&](const MapUnitSpawn& spawn) {
+        return spawn.team_id < 0 || active_teams.empty() ||
+               active_teams.count(spawn.team_id) != 0;
+    };
 
     for (const MapUnitSpawn& spawn : loaded.units) {
         if (!spawn_map_units) break;
+        if (!participating(spawn)) continue;
         const bool known = spawn.custom_unit
             ? registry_.is_custom(spawn.unit_type)
             : registry_.get_map_unit(spawn.unit_type) != nullptr;
@@ -232,10 +239,14 @@ void Engine::load_map(const Str& path, bool spawn_map_units) {
     if (!spawn_map_units) return;
 
     Set<i32> teams;
-    for (const MapUnitSpawn& spawn : map_data_->units) teams.insert(spawn.team_id);
+    teams.insert(active_teams.begin(), active_teams.end());
+    for (const MapUnitSpawn& spawn : map_data_->units) {
+        if (participating(spawn)) teams.insert(spawn.team_id);
+    }
     for (i32 team_id : teams) create_world(team_id);
 
     for (const MapUnitSpawn& spawn : map_data_->units) {
+        if (!participating(spawn)) continue;
         World* world = get_world(spawn.team_id);
         if (!world) continue;
         Unit* unit = world->spawn_map_unit(spawn.unit_type, spawn.x, spawn.y);
@@ -880,7 +891,7 @@ void Engine::execute_command(i32 team_id, const GameCommand& serialized_command)
             for (auto& [other_team, other_world] : worlds_) {
                 if (other_team == team_id || are_allied(team_id, other_team)) continue;
                 Unit* target = other_world.get_unit(cmd.target_uid);
-                if (target && target->is_alive && w->can_see(*target)) {
+                if (target && target->is_alive) {
                     target_team_id = other_team;
                     break;
                 }

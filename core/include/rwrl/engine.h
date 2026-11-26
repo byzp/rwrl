@@ -26,7 +26,8 @@ public:
     World& create_world(i32 team_id);
     void setup_teams(i32 team_a = 0, i32 team_b = 1);
     void setup_teams_vec(const Vec<i32>& team_ids);
-    void load_map(const Str& path, bool spawn_map_units = true);
+    void load_map(const Str& path, bool spawn_map_units = true,
+                  const Vec<i32>& active_team_ids = {});
     // Native saves own their object shells and IDs independently of TMX
     // spawns. Load the terrain first, restore shells in saved list order,
     // then restore the shared allocator and rebuild occupancy once.

@@ -112,6 +112,8 @@ class CommandHandler:
             return
         try:
             val = int(args[0])
+            from net.packet import starting_credit_mode
+            starting_credit_mode(val)
             self.server.config.starting_credits = float(val)
             self._sync()
         except ValueError:
@@ -125,10 +127,7 @@ class CommandHandler:
         enabled = args[0].lower() in ("on", "true", "1", "yes")
         self.server.config.nukes_enabled = enabled
         if self.server.room and self.server.room.engine:
-            for tid in range(4):
-                w = self.server.room.engine.get_world(tid)
-                if w:
-                    w.set_nukes_enabled(enabled)
+            self.server.room.engine.set_nukes_enabled(enabled)
         self._sync()
 
     def _cmd_addai(self, pid, args):
@@ -179,13 +178,13 @@ class CommandHandler:
         if not self._is_admin(pid):
             return
         if not args:
-            self.server.send_chat(pid, f"Income: {getattr(self.server.config, 'income_multiplier', 1.0)}")
+            self.server.send_chat(pid, f"Income: {self.server.config.income_mult}")
             return
         try:
             val = float(args[0])
-            self.server.config.income_multiplier = val
+            self.server.config.income_mult = val
             if self.server.room and self.server.room.engine:
-                self.server.room.engine.set_income_multiplier(val)
+                self.server.room.engine.set_income_mult(val)
             self._sync()
         except ValueError:
             pass
@@ -299,7 +298,7 @@ class CommandHandler:
             return
         if not self._is_admin(pid):
             return
-        self.server.room.engine.set_speed_mult(0.0)
+        self.server.set_paused(True)
         self.server.send_chat(pid, "Game paused")
 
     def _cmd_unpause(self, pid, args):
@@ -308,7 +307,7 @@ class CommandHandler:
             return
         if not self._is_admin(pid):
             return
-        self.server.room.engine.set_speed_mult(self.server.config.speed)
+        self.server.set_paused(False)
         self.server.send_chat(pid, "Game unpaused")
 
     # ------------------------------------------------------------------ #
@@ -515,13 +514,13 @@ class CommandHandler:
         if not self._is_admin(pid):
             return
         if not args:
-            spd = self.server.room.engine.speed_mult if self.server.room and self.server.room.engine else 0
+            spd = self.server.config.speed
             self.server.send_chat(pid, f"Speed: {spd}")
             return
         try:
             spd = float(args[0])
-            self.server.room.engine.set_speed_mult(spd)
-            self.server.send_chat(pid, f"Speed set to {spd}")
+            if self.server.set_game_speed(spd):
+                self.server.send_chat(pid, f"Speed set to {spd}")
         except (ValueError, AttributeError):
             pass
 
