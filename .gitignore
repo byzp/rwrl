@@ -1,0 +1,22 @@
+__pycache__/
+*.py[cod]
+*.so
+*.class
+*.jar
+
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+
+core/build/
+
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+
+# Large data files
+models/
+dataset/
+logs/
