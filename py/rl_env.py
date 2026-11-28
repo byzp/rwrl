@@ -220,6 +220,7 @@ class RLEnv:
         self.worlds: list[rwrl_core.World] = []
         self._num_teams = 0
         self._static_map: np.ndarray | None = None
+        self._resource_pools: np.ndarray | None = None
         self._reward_config = reward_config or RewardConfig()
         self._prev_obs: dict[int, TeamObservation] = {}
 
@@ -270,6 +271,7 @@ class RLEnv:
                 w.add_credits(max(0, self._starting_credits - w.credits()))
         self.worlds = worlds
         self._static_map = None
+        self._resource_pools = None
         self._prev_obs = {}
         self.engine.run_for(0.0, self._dt)
         obs = self.observe()
@@ -324,6 +326,7 @@ class RLEnv:
             'map_height': self.engine.map_height(),
             'tile_size': self.engine.tile_size(),
             'static_map': self._get_static_map(),
+            'resource_pools': self._get_resource_pools().tolist(),
             'teams': [],
         }
         for tid, w in enumerate(self.worlds):
@@ -355,6 +358,21 @@ class RLEnv:
                         grid[2, gy, gx] = 1.0
         self._static_map = grid
         return grid
+
+    def _get_resource_pools(self) -> np.ndarray:
+        """Return exact resource-pool tile centers in world coordinates."""
+        if self._resource_pools is not None:
+            return self._resource_pools
+        pools = []
+        if self.worlds:
+            world = self.worlds[0]
+            tile = self.engine.tile_size()
+            for ty in range(self.engine.map_height()):
+                for tx in range(self.engine.map_width()):
+                    if world.is_resource_pool(tx, ty):
+                        pools.append(((tx + 0.5) * tile, (ty + 0.5) * tile))
+        self._resource_pools = np.asarray(pools, dtype=np.float32).reshape(-1, 2)
+        return self._resource_pools
 
     def _observe_world(self, w: rwrl_core.World, team_id: int) -> dict:
         cargo_uids = _collect_cargo_uids(w)

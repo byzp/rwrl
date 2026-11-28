@@ -231,7 +231,7 @@ void restore_unit_runtime(rwrl::Unit& unit, const py::dict& values) {
 }
 }
 
-PYBIND11_MODULE(rwrl_core, m) {
+PYBIND11_MODULE(rwrl_core, m, py::mod_gil_not_used()) {
     m.doc() = "Rusted Warfare RL — C++ simulation engine";
 
     py::enum_<rwrl::MoveType>(m, "MoveType")
@@ -1795,7 +1795,9 @@ PYBIND11_MODULE(rwrl_core, m) {
         .def_readonly("game_over", &rwrl::EngineState::game_over)
         .def_readonly("winner_team", &rwrl::EngineState::winner_team);
 
-    py::class_<rwrl::Engine>(m, "Engine")
+    py::class_<rwrl::Engine>(m, "Engine",
+        "Mutable simulation instance. Separate instances may run concurrently; "
+        "serialize access to each instance and its World/Unit references.")
         .def(py::init<>())
         .def("create_world", &rwrl::Engine::create_world, py::return_value_policy::reference)
         .def("setup_teams", &rwrl::Engine::setup_teams,

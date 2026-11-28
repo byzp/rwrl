@@ -6,7 +6,7 @@ class Player:
     __slots__ = (
         'player_id', 'slot_id', 'name', 'team_id', 'conn', 'client_id',
         'is_admin', 'reconnect_packets', 'present_at_game_start',
-        'shared_control',
+        'shared_control', 'is_ai',
     )
 
     def __init__(self, player_id: int, name: str, team_id: int, conn=None,
@@ -21,6 +21,7 @@ class Player:
         self.reconnect_packets = []
         self.present_at_game_start = False
         self.shared_control = False
+        self.is_ai = False
 
     def __repr__(self):
         return f"Player({self.player_id}, {self.name}, T{self.team_id})"
@@ -58,6 +59,26 @@ class Room:
             slot_id=slot_id,
             client_id=client_id,
         )
+        self._next_pid += 1
+        self.players[p.player_id] = p
+        self.events.emit(Event(EventType.PLAYER_JOIN, player=p))
+        return p
+
+    def add_ai_player(self, name: str = "Model AI") -> Player | None:
+        """Add a connectionless model-controlled player to an open slot."""
+        used_slots = {player.slot_id for player in self.players.values()}
+        slot_id = next((slot for slot in range(100) if slot not in used_slots), None)
+        if slot_id is None:
+            return None
+        p = Player(
+            self._next_pid,
+            name,
+            slot_id % 2,
+            conn=None,
+            slot_id=slot_id,
+            client_id=f"model-ai-{self._next_pid}",
+        )
+        p.is_ai = True
         self._next_pid += 1
         self.players[p.player_id] = p
         self.events.emit(Event(EventType.PLAYER_JOIN, player=p))

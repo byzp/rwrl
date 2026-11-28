@@ -131,7 +131,10 @@ class CommandHandler:
         self._sync()
 
     def _cmd_addai(self, pid, args):
-        self.server.send_chat(pid, "AI not supported in this server")
+        if not self._is_admin(pid):
+            return
+        ok, message = self.server.add_model_ai()
+        self.server.send_chat(pid, message)
 
     def _cmd_fog(self, pid, args):
         if not self._is_admin(pid):

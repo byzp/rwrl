@@ -12,7 +12,7 @@ _DEFAULTS = {
         'host': '0.0.0.0',
         'port': '5123',
         'max_players': '12',
-        'speed': '2.5',
+        'speed': '1.0',
         'starting_credits': '4000',
         'income_mult': '1.0',
         'unit_cap': '250',
@@ -27,6 +27,16 @@ _DEFAULTS = {
     'rl': {
         'enabled': 'false',
         'tick_rate': '0',
+    },
+    'ai': {
+        'model_path': 'models/ice_strategy_v3/bc_best.pt',
+        'device': 'auto',
+        'deterministic': 'true',
+        'ticks_per_inference': '10',
+    },
+    'diagnostics': {
+        'enabled': 'false',
+        'log_file': 'logs/server_packets.jsonl',
     },
     'admin': {
         'password': 'admin',
@@ -101,3 +111,24 @@ class Config:
 
     @property
     def rl_tick_rate(self): return self.getint('rl', 'tick_rate')
+
+    @property
+    def ai_model_path(self): return self.get('ai', 'model_path')
+
+    @property
+    def ai_device(self): return self.get('ai', 'device')
+
+    @property
+    def ai_deterministic(self): return self.getbool('ai', 'deterministic')
+
+    @property
+    def ai_ticks_per_inference(self):
+        return max(1, self.getint('ai', 'ticks_per_inference', fallback=10))
+
+    @property
+    def diagnostics_enabled(self):
+        return self.getbool('diagnostics', 'enabled', fallback=False)
+
+    @property
+    def diagnostics_log_file(self):
+        return self.get('diagnostics', 'log_file', fallback='logs/server_packets.jsonl')

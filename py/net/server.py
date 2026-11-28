@@ -21,9 +21,11 @@ class Connection:
         'fps', 'client_id', 'disconnect_reason', 'reconnecting',
         'reconnect_activating', '_recv_buf', '_write_buf',
         '_io_thread', '_closed', '_lock',
+        '_packet_logger',
     )
 
-    def __init__(self, sock: socket.socket, conn_id: int, addr: str):
+    def __init__(self, sock: socket.socket, conn_id: int, addr: str,
+                 packet_logger=None):
         self.conn_id = conn_id
         self.sock = sock
         self.addr = addr
@@ -47,6 +49,7 @@ class Connection:
         self._io_thread = None
         self._closed = False
         self._lock = threading.Lock()
+        self._packet_logger = packet_logger
 
     def queue_send(self, data: bytes):
         with self._lock:
@@ -56,6 +59,8 @@ class Connection:
             if len(self._write_buf) > _WRITE_BUF_HIGH:
                 self._close_locked()
                 return
+        if self._packet_logger is not None:
+            self._packet_logger('server_to_client', self, data)
         if self._io_thread is not None:
             self._io_thread.request_write(self)
 
@@ -197,9 +202,17 @@ class _IOThread:
             if len(buf) < total:
                 break
             body = bytes(buf[8:total])
+            if self.server.packet_logger is not None:
+                self.server.packet_logger(
+                    'client_to_server', conn, bytes(buf[:total]))
             del buf[:total]
             if self.server.on_packet:
-                self.server.on_packet(conn, pkt_type, body)
+                try:
+                    self.server.on_packet(conn, pkt_type, body)
+                except Exception as exc:
+                    if self.server.on_packet_error is None:
+                        raise
+                    self.server.on_packet_error(conn, pkt_type, exc)
 
     def _do_send(self, conn: Connection):
         with conn._lock:
@@ -257,6 +270,8 @@ class NetServer:
         self.on_connect = None
         self.on_disconnect = None
         self.on_packet = None
+        self.on_packet_error = None
+        self.packet_logger = None
         self._listen_sock = None
         self._accept_thread = None
         self._running = False
@@ -326,7 +341,8 @@ class NetServer:
                     conn_id = self._next_id
                     self._next_id += 1
                 addr = f"{client_addr[0]}:{client_addr[1]}"
-                conn = Connection(client_sock, conn_id, addr)
+                conn = Connection(client_sock, conn_id, addr,
+                                  packet_logger=self.packet_logger)
 
                 with self._conn_lock:
                     self.connections[conn_id] = conn

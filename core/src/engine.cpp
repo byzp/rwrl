@@ -5,7 +5,7 @@
 namespace rwrl {
 
 namespace {
-i32 g_global_random_seed = 0;
+thread_local i32 g_global_random_seed = 0;
 
 // GameSaver creates fresh shells and restores only serialized runtime fields.
 // In particular, aU, command caches, collision candidates and ap.b/m are

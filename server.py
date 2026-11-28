@@ -1,4 +1,5 @@
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import sys
 import struct
@@ -18,13 +19,14 @@ from net.packet import (pack_preregister_info, pack_server_info, pack_team_list,
                         DEFAULT_MAP, DEFAULT_MAP_PATH, pack_step_rate_command,
                         starting_credit_mode,
                         pack_kick, pack_disconnect, pack_get_server_info)
+from net.packet_log import PacketCapture
 from game import Room, Player
 from command import CommandHandler
 from event import EventBus, EventType, Event
 from config import Config
 from unit_config import load_unit_assets
 from resource_paths import MAPS_DIR, resolve_map_path
-from rl.native_commands import prepare_client_command
+from rl.native_commands import encode_model_command, prepare_client_command
 from rl.replay_parser import ReplayAction, parse_game_command
 
 
@@ -55,6 +57,20 @@ class RwrlServer:
         self._pending_summon = None
         self._pending_nuke = None
         self._pending_clone = None
+        self._model_ai = None
+        self._model_ai_players: set[int] = set()
+        self._model_ai_loader = ThreadPoolExecutor(max_workers=1,
+                                                    thread_name_prefix='model-ai-load')
+        self._model_ai_future = None
+        self._model_ai_load_error = None
+        self._ai_tick_interval = self.config.ai_ticks_per_inference
+        self.packet_capture = None
+        if self.config.diagnostics_enabled:
+            self.packet_capture = PacketCapture(self.config.diagnostics_log_file)
+            self._log_diagnostic(
+                'server_initialized', host=self.config.host,
+                port=self.config.port, packet_capture=True,
+            )
 
         if self.rl_mode:
             self._net_tick_rate = self.config.rl_tick_rate
@@ -65,16 +81,30 @@ class RwrlServer:
             self.net.on_connect = self._on_connect
             self.net.on_disconnect = self._on_disconnect
             self.net.on_packet = self._on_packet
+            self.net.on_packet_error = self._on_packet_error
+            if self.packet_capture is not None:
+                self.net.packet_logger = self.packet_capture.packet
 
         self.events.on(EventType.GAME_START, self._on_game_start)
         self.events.on(EventType.GAME_OVER, self._on_game_over)
 
     def _on_connect(self, conn: Connection):
         print(f"[Server] Player connected: {conn}")
+        self._log_diagnostic('client_connected', connection_id=conn.conn_id,
+                             peer=conn.addr)
 
     def _on_disconnect(self, conn: Connection):
+        self._log_diagnostic(
+            'client_disconnected', connection_id=conn.conn_id, peer=conn.addr,
+            reason=conn.disconnect_reason,
+        )
         with self._state_lock:
             self._disconnect_player(conn)
+
+    def _log_diagnostic(self, event_name, **fields):
+        capture = getattr(self, 'packet_capture', None)
+        if capture is not None:
+            capture.event(event_name, **fields)
 
     def _disconnect_player(self, conn: Connection):
         if conn.player_id < 0 or not self.room:
@@ -120,6 +150,13 @@ class RwrlServer:
     def _on_packet(self, conn: Connection, pkt_type: int, body: bytes):
         with self._state_lock:
             self._dispatch_packet(conn, pkt_type, body)
+
+    def _on_packet_error(self, conn: Connection, pkt_type: int, exc: Exception):
+        print(f'[Server] Packet handler error from {conn}: type={pkt_type}: {exc}')
+        self._log_diagnostic(
+            'packet_handler_error', connection_id=conn.conn_id,
+            peer=conn.addr, packet_type=int(pkt_type), error=repr(exc),
+        )
 
     def _dispatch_packet(self, conn: Connection, pkt_type: int, body: bytes):
         if (conn.player_id >= 0 and
@@ -198,8 +235,55 @@ class RwrlServer:
         conn.slot_id = p.slot_id
         conn.registered = True
         self._player_conns[p.player_id] = conn
+        self._log_diagnostic(
+            'player_registered', connection_id=conn.conn_id,
+            player_id=p.player_id, name=p.name, slot=p.slot_id,
+            team=p.team_id,
+        )
 
         self._finish_registration(conn)
+
+    def add_model_ai(self) -> tuple[bool, str]:
+        """Add one checkpoint-driven player to the waiting-room lobby."""
+        with self._state_lock:
+            if self.room is None or self.room.state != 'waiting':
+                return False, 'Game is running'
+            if len(self.room.players) >= self.config.max_players:
+                return False, 'No free player slots'
+            from resource_paths import project_path
+            if not project_path(self.config.ai_model_path).is_file():
+                return False, f'Model AI unavailable: {self.config.ai_model_path}'
+            player = self.room.add_ai_player()
+            if player is None:
+                return False, 'No free player slots'
+            self._model_ai_players.add(player.player_id)
+            if self._model_ai is None and self._model_ai_future is None:
+                self._model_ai_load_error = None
+                self._model_ai_future = self._model_ai_loader.submit(
+                    self._load_model_ai)
+            self._sync_team_lists()
+            return True, f'Added model AI at slot {player.slot_id + 1}'
+
+    def _load_model_ai(self):
+        from rl.server_ai import ModelAIController
+        return ModelAIController(
+            self.config.ai_model_path,
+            self.config.ai_device,
+            self.config.ai_deterministic,
+        )
+
+    def _poll_model_ai_loader(self):
+        future = self._model_ai_future
+        if future is None or not future.done():
+            return
+        self._model_ai_future = None
+        try:
+            self._model_ai = future.result()
+            print(f'[Server] Model AI loaded: {self._model_ai.model_path} '
+                  f'({self._model_ai.parameter_count:,} parameters)')
+        except Exception as exc:
+            self._model_ai_load_error = str(exc)
+            print(f'[Server] Model AI unavailable: {exc}')
 
     def _find_reconnect_player(self, client_id: str):
         if not self.room or not client_id:
@@ -331,6 +415,11 @@ class RwrlServer:
         if not msg:
             return
 
+        # The 1.15 client prefixes chat payloads with the channel marker "c ".
+        # Strip it before looking for the native . / - / _ command prefixes.
+        if msg.startswith('c '):
+            msg = msg[2:]
+
         command = msg
         if msg[0] in ".-_":
             payload = msg[1:]
@@ -420,6 +509,14 @@ class RwrlServer:
         self._game_tick_history.clear()
         self._next_blocking_frame = 0
         self._game_ready = False
+        if self._model_ai is not None:
+            self._model_ai.close()
+        if self._model_ai_future is not None:
+            self._model_ai_future.cancel()
+        self._model_ai = None
+        self._model_ai_future = None
+        self._model_ai_load_error = None
+        self._model_ai_players.clear()
 
     def _on_game_start(self, event: Event):
         pkt = pack_start(map_name=self.map_path)
@@ -448,6 +545,10 @@ class RwrlServer:
                 p.reconnect_packets = []
                 if p.conn is not None:
                     p.conn.in_game = False
+            if self._model_ai is not None:
+                self._model_ai_players = {
+                    p.player_id for p in self.room.players.values() if p.is_ai
+                }
             self._sync_team_lists()
 
     def send_chat(self, player_id: int, message: str):
@@ -460,6 +561,7 @@ class RwrlServer:
             conn.close()
         if self.room:
             self.room.remove_player(player_id)
+        self._model_ai_players.discard(player_id)
 
     def move_lobby_player(
         self,
@@ -571,6 +673,12 @@ class RwrlServer:
         self._game_ready = False
         self._game_start_time = time.monotonic()
         self.room.start_game(map_loaded=map_loaded)
+        self._log_diagnostic(
+            'game_started', map=self.map_path, speed=self.config.speed,
+            players=[{'player_id': p.player_id, 'slot': p.slot_id,
+                      'team': p.team_id, 'ai': p.is_ai}
+                     for p in self.room.players.values()],
+        )
         if self.config.speed != 1.0:
             self.set_game_speed(self.config.speed)
         self._apply_fog()
@@ -664,6 +772,7 @@ class RwrlServer:
             return
         if self.engine.is_paused():
             return
+        self._poll_model_ai_loader()
         if not self._game_ready:
             waiting = any(conn.registered and not conn.in_game and not conn.reconnecting
                           for conn in self._player_conns.values())
@@ -672,6 +781,37 @@ class RwrlServer:
             self._game_ready = True
 
         frame = self.engine.global_tick()
+        if self._model_ai is not None and self._model_ai_players:
+            try:
+                model_commands = self._model_ai.poll_commands()
+                if model_commands:
+                    print(f'[Server] Model AI emitted {len(model_commands)} '
+                          f'commands at frame {frame}')
+                for model_command in model_commands:
+                    try:
+                        body = encode_model_command(model_command)
+                        action = parse_game_command(body, tick=frame)
+                        # No path cache was captured at decision time; let the
+                        # server engine build its path just as the client does.
+                        action.path_cache_payload_present = False
+                        self._pending_game_commands.append((body, action))
+                        self._log_diagnostic(
+                            'model_command_encoded', frame=frame,
+                            player_slot=int(model_command.control_player_team_id),
+                            unit_uid=int(model_command.unit_uid),
+                            action=int(model_command.action),
+                            action_id=str(model_command.action_id),
+                            packet_command_bytes=len(body),
+                        )
+                    except (ValueError, OverflowError) as exc:
+                        print(f'[Server] Model AI command cannot be broadcast: {exc}')
+                        self._log_diagnostic(
+                            'model_command_dropped', frame=frame,
+                            action=int(model_command.action), error=str(exc),
+                        )
+            except Exception as exc:
+                print(f'[Server] Model AI command error: {exc}')
+
         commands = []
         if frame == self._next_blocking_frame:
             pending = self._pending_game_commands
@@ -684,6 +824,18 @@ class RwrlServer:
             commands = [action for _, action in pending]
         elif frame > self._next_blocking_frame:
             raise RuntimeError('Simulation advanced past the network blocking frame')
+        if (self._model_ai is not None and self._model_ai_players and
+                frame % self._ai_tick_interval == 0):
+            active_slots = [p.slot_id for p in self.room.players.values()
+                            if p.team_id != -3]
+            self._model_ai.bind(self.engine, active_slots)
+            ai_slots = []
+            for player_id in sorted(self._model_ai_players):
+                player = self.room.players.get(player_id)
+                if player is None or player.team_id == -3:
+                    continue
+                ai_slots.append(player.slot_id)
+            self._model_ai.submit(ai_slots)
         self.room.tick(commands=commands)
 
     def _send_game_tick(self, packet: bytes):
@@ -712,6 +864,8 @@ class RwrlServer:
         if not self.rl_mode:
             self.net.start()
             print(f"[Server] RWRL Server running on {self.config.host}:{self.config.port}")
+            if self.packet_capture is not None:
+                print(f"[Server] Packet log: {self.packet_capture.path}")
         else:
             print(f"[Server] RWRL Server running in RL mode (unlimited TPS, no network)")
         self.events.emit(Event(EventType.SERVER_START))
@@ -719,8 +873,17 @@ class RwrlServer:
 
     def stop(self):
         self._running = False
+        if self._model_ai is not None:
+            self._model_ai.close()
+        if self._model_ai_future is not None:
+            self._model_ai_future.cancel()
+        self._model_ai_loader.shutdown(wait=False, cancel_futures=True)
         if self.net is not None:
             self.net.stop()
+        self._log_diagnostic('server_stopped')
+        if self.packet_capture is not None:
+            self.packet_capture.close()
+            self.packet_capture = None
         self.events.emit(Event(EventType.SERVER_STOP))
 
 
@@ -730,6 +893,8 @@ def main():
     ap.add_argument('-c', '--config', default=None, help='Config file path')
     ap.add_argument('--host', default=None)
     ap.add_argument('--port', type=int, default=None)
+    ap.add_argument('--log-file', default=None,
+                    help='Enable packet and event logging to this JSONL file')
     args = ap.parse_args()
 
     cfg = Config(args.config)
@@ -737,6 +902,9 @@ def main():
         cfg._cp.set('server', 'host', args.host)
     if args.port is not None:
         cfg._cp.set('server', 'port', str(args.port))
+    if args.log_file:
+        cfg._cp.set('diagnostics', 'enabled', 'true')
+        cfg._cp.set('diagnostics', 'log_file', args.log_file)
 
     server = RwrlServer(cfg)
     try:
